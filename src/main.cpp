@@ -1,23 +1,32 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+#include <Adafruit_NeoPixel.h>
 #include <nvs_flash.h>
 #include <BleKeyboard.h>
+#include "webpage.h"
 
 // ================= Pin Definitions =================
-// KY-040 Rotary Encoder
+// 1. KY-040 Rotary Encoder (Chỉnh âm lượng)
 #define PIN_ENCODER_CLK   3
 #define PIN_ENCODER_DT    4
 #define PIN_ENCODER_SW    5
 
-// 3 External Push Buttons (chân âm chung nối GND, chân còn lại vào ESP)
-#define PIN_BTN_NEXT      6   // Chuyển bài (Next track)
-#define PIN_BTN_PREV      7   // Back lại (Previous track)
-#define PIN_BTN_PLAY      10  // Dừng phát (Play / Pause)
+// 2. 3 External Push Buttons (1 chân vào GND, 1 chân vào ESP32-C3)
+#define PIN_BTN_NEXT      6   // Chuyển bài tiếp theo (Next Track)
+#define PIN_BTN_PREV      7   // Lùi bài trước (Previous Track)
+#define PIN_BTN_PLAY      10  // Dừng / Phát nhạc (Play / Pause)
 
-// Built-in LED on ESP32-C3 Super Mini (GPIO 8, active LOW)
+// 3. Built-in LED on ESP32-C3 Super Mini (GPIO 8, active LOW)
 #define PIN_LED           8
 
+// 4. Chân điều khiển LED dây RGB WS2812B (Data Pin)
+#define PIN_LED_STRIP     2
+
 // ================= BLE Keyboard Instance =================
-BleKeyboard bleKeyboard("NAM-DZ", "NAM", 100);
+BleKeyboard bleKeyboard("PIXEL-DECK-AUDIO", "NAM", 100);
 
 // ================= Debounced Button Class =================
 class Button {
@@ -58,40 +67,433 @@ class Button {
     }
 };
 
-// Button instances
 Button btnEncoderSW(PIN_ENCODER_SW);
 Button btnNext(PIN_BTN_NEXT);
 Button btnPrev(PIN_BTN_PREV);
 Button btnPlay(PIN_BTN_PLAY);
 
-// ================= Encoder State Variables =================
+// ================= Encoder State Machine =================
 static const int8_t rot_enc_table[] = {
   0,  1, -1,  0,
  -1,  0,  0,  1,
   1,  0,  0, -1,
   0, -1,  1,  0
 };
-
 static uint8_t enc_last_state = 0;
 static int8_t enc_counter = 0;
 
+// ================= LED Strip & WebServer Configuration =================
+#define DNS_PORT 53
+WebServer server(80);
+DNSServer dnsServer;
+Preferences prefs;
+
+Adafruit_NeoPixel* ledStrip = nullptr;
+
+// Trạng thái LED
+bool ledPower = true;
+uint8_t ledBrightness = 255;
+uint8_t ledSpeed = 50;
+int ledCount = 60;
+uint8_t ledFx = 1;            // Mặc định: Hiệu ứng 1 (Center Out - Chạy từ giữa ra 2 đầu)
+uint8_t ledR = 255;
+uint8_t ledG = 107;
+uint8_t ledB = 0;
+
+uint16_t effectStep = 0;
+unsigned long lastEffectUpdate = 0;
+
+bool needSaveState = false;
+unsigned long saveTriggerTime = 0;
+
+const char* apSSID = "PIXEL-DECK-LED";
+
+// ---------------- Khởi tạo / Cập nhật dải LED ----------------
+void initLedStrip() {
+  if (ledStrip != nullptr) {
+    delete ledStrip;
+    ledStrip = nullptr;
+  }
+  ledStrip = new Adafruit_NeoPixel(ledCount, PIN_LED_STRIP, NEO_GRB + NEO_KHZ800);
+  ledStrip->begin();
+  ledStrip->setBrightness(ledPower ? ledBrightness : 0);
+  ledStrip->show();
+}
+
+void updateLedBrightness() {
+  if (ledStrip != nullptr) {
+    ledStrip->setBrightness(ledPower ? ledBrightness : 0);
+    ledStrip->show();
+  }
+}
+
+// ---------------- Đọc & Lưu cấu hình vào NVS (Flash) ----------------
+void loadSettings() {
+  prefs.begin("deskled", true);
+  ledPower = prefs.getBool("power", true);
+  ledBrightness = prefs.getUChar("bri", 255);
+  ledSpeed = prefs.getUChar("spd", 50);
+  ledCount = prefs.getInt("count", 60);
+  if (ledCount < 1 || ledCount > 300) ledCount = 60;
+  ledFx = prefs.getUChar("fx", 1);
+  ledR = prefs.getUChar("r", 255);
+  ledG = prefs.getUChar("g", 107);
+  ledB = prefs.getUChar("b", 0);
+  prefs.end();
+}
+
+void triggerSave() {
+  needSaveState = true;
+  saveTriggerTime = millis();
+}
+
+void savePendingState() {
+  if (needSaveState && (millis() - saveTriggerTime > 800)) {
+    needSaveState = false;
+    prefs.begin("deskled", false);
+    prefs.putBool("power", ledPower);
+    prefs.putUChar("bri", ledBrightness);
+    prefs.putUChar("spd", ledSpeed);
+    prefs.putInt("count", ledCount);
+    prefs.putUChar("fx", ledFx);
+    prefs.putUChar("r", ledR);
+    prefs.putUChar("g", ledG);
+    prefs.putUChar("b", ledB);
+    prefs.end();
+    Serial.println("[NVS] Da luu cau hinh LED vao Flash.");
+  }
+}
+
+// ---------------- Bánh xe màu cho hiệu ứng Rainbow ----------------
+uint32_t Wheel(byte WheelPos) {
+  WheelPos = 255 - WheelPos;
+  if (WheelPos < 85) {
+    return Adafruit_NeoPixel::Color(255 - WheelPos * 3, 0, WheelPos * 3);
+  }
+  if (WheelPos < 170) {
+    WheelPos -= 85;
+    return Adafruit_NeoPixel::Color(0, WheelPos * 3, 255 - WheelPos * 3);
+  }
+  WheelPos -= 170;
+  return Adafruit_NeoPixel::Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+}
+
+// ---------------- Các Hiệu Ứng LED RGB ----------------
+void runLedEffects() {
+  if (!ledStrip) return;
+
+  if (!ledPower) {
+    ledStrip->clear();
+    ledStrip->show();
+    return;
+  }
+
+  // Tốc độ khung hình (Speed: 5 - 100)
+  unsigned long interval = map(105 - ledSpeed, 5, 100, 10, 150);
+  if (millis() - lastEffectUpdate < interval) return;
+  lastEffectUpdate = millis();
+
+  switch (ledFx) {
+    case 0: // Sáng tĩnh 1 màu (Solid)
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, ledR, ledG, ledB);
+      }
+      ledStrip->show();
+      break;
+
+    case 1: { // 🌟 TỪ GIỮA DÂY CHẠY RA 2 ĐẦU (Center Out)
+      float mid = (ledCount - 1) / 2.0;
+      int halfLen = (ledCount + 1) / 2;
+
+      // 1. Fade nhẹ các pixel cũ để tạo vệt đuôi ánh sáng sao băng
+      for (int i = 0; i < ledCount; i++) {
+        uint32_t c = ledStrip->getPixelColor(i);
+        uint8_t r = ((c >> 16) & 0xFF) * 0.75;
+        uint8_t g = ((c >> 8) & 0xFF) * 0.75;
+        uint8_t b = (c & 0xFF) * 0.75;
+        ledStrip->setPixelColor(i, r, g, b);
+      }
+
+      // 2. Tỏa điểm sáng từ tâm ra 2 đầu
+      int step = effectStep % (halfLen + 4);
+      if (step < halfLen) {
+        int leftIdx = (int)floor(mid - step);
+        int rightIdx = (int)ceil(mid + step);
+        if (leftIdx >= 0 && leftIdx < ledCount) {
+          ledStrip->setPixelColor(leftIdx, ledR, ledG, ledB);
+        }
+        if (rightIdx >= 0 && rightIdx < ledCount) {
+          ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
+        }
+      }
+
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 2: { // TỪ 2 ĐẦU DỒN VÀO GIỮA (Edges In)
+      float mid = (ledCount - 1) / 2.0;
+      int halfLen = (ledCount + 1) / 2;
+
+      for (int i = 0; i < ledCount; i++) {
+        uint32_t c = ledStrip->getPixelColor(i);
+        uint8_t r = ((c >> 16) & 0xFF) * 0.75;
+        uint8_t g = ((c >> 8) & 0xFF) * 0.75;
+        uint8_t b = (c & 0xFF) * 0.75;
+        ledStrip->setPixelColor(i, r, g, b);
+      }
+
+      int step = effectStep % (halfLen + 4);
+      if (step < halfLen) {
+        int leftIdx = step;
+        int rightIdx = ledCount - 1 - step;
+        if (leftIdx >= 0 && leftIdx < ledCount) {
+          ledStrip->setPixelColor(leftIdx, ledR, ledG, ledB);
+        }
+        if (rightIdx >= 0 && rightIdx < ledCount) {
+          ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
+        }
+      }
+
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 3: { // Cầu vồng cuộn (Rainbow Cycle)
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, Wheel(((i * 256 / ledCount) + effectStep) & 255));
+      }
+      ledStrip->show();
+      effectStep = (effectStep + 2) & 255;
+      break;
+    }
+
+    case 4: { // Thở nhịp (Breathe)
+      float val = (exp(sin(effectStep * 0.05)) - 0.36787944) * 108.0;
+      uint8_t factor = constrain((int)val, 5, 255);
+      uint8_t brR = (ledR * factor) / 255;
+      uint8_t brG = (ledG * factor) / 255;
+      uint8_t brB = (ledB * factor) / 255;
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, brR, brG, brB);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 5: { // Đuổi màu (Chase)
+      int head = effectStep % ledCount;
+      ledStrip->clear();
+      for (int t = 0; t < 6; t++) {
+        int pos = (head - t + ledCount) % ledCount;
+        uint8_t fade = 255 / (t + 1);
+        ledStrip->setPixelColor(pos, (ledR * fade) / 255, (ledG * fade) / 255, (ledB * fade) / 255);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 6: { // Quét màu (Wipe)
+      int pos = effectStep % (ledCount * 2);
+      if (pos < ledCount) {
+        ledStrip->setPixelColor(pos, ledR, ledG, ledB);
+      } else {
+        ledStrip->setPixelColor(pos - ledCount, 0, 0, 0);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 7: { // Lấp lánh (Twinkle Stars)
+      for (int i = 0; i < ledCount; i++) {
+        uint32_t c = ledStrip->getPixelColor(i);
+        uint8_t r = ((c >> 16) & 0xFF) * 0.85;
+        uint8_t g = ((c >> 8) & 0xFF) * 0.85;
+        uint8_t b = (c & 0xFF) * 0.85;
+        ledStrip->setPixelColor(i, r, g, b);
+      }
+      if (random(10) < 4) {
+        int p = random(ledCount);
+        ledStrip->setPixelColor(p, ledR, ledG, ledB);
+      }
+      ledStrip->show();
+      break;
+    }
+
+    case 8: { // Sao băng (Meteor Rain)
+      for (int j = 0; j < ledCount; j++) {
+        if (random(10) > 4) {
+          uint32_t c = ledStrip->getPixelColor(j);
+          uint8_t r = ((c >> 16) & 0xFF) * 0.7;
+          uint8_t g = ((c >> 8) & 0xFF) * 0.7;
+          uint8_t b = (c & 0xFF) * 0.7;
+          ledStrip->setPixelColor(j, r, g, b);
+        }
+      }
+      int head = effectStep % (ledCount + 10);
+      if (head < ledCount) {
+        ledStrip->setPixelColor(head, ledR, ledG, ledB);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 9: { // Ngọn lửa ấm (Fire)
+      for (int i = 0; i < ledCount; i++) {
+        int flicker = random(0, 55);
+        int r1 = constrain(ledR - flicker, 0, 255);
+        int g1 = constrain(ledG - flicker * 2, 0, 255);
+        int b1 = constrain(ledB - flicker * 3, 0, 255);
+        ledStrip->setPixelColor(i, r1, g1, b1);
+      }
+      ledStrip->show();
+      break;
+    }
+
+    case 10: { // Chớp nháy (Strobe)
+      bool on = (effectStep % 2 == 0);
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, on ? ledR : 0, on ? ledG : 0, on ? ledB : 0);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    default:
+      ledFx = 1;
+      break;
+  }
+}
+
+// ---------------- Cấu hình WebServer & Captive Portal ----------------
+void setupWebServer() {
+  server.on("/", HTTP_GET, []() {
+    server.send_P(200, "text/html", INDEX_HTML);
+  });
+
+  server.on("/api/state", HTTP_GET, []() {
+    String json = "{";
+    json += "\"power\":" + String(ledPower ? 1 : 0) + ",";
+    json += "\"bri\":" + String(ledBrightness) + ",";
+    json += "\"spd\":" + String(ledSpeed) + ",";
+    json += "\"count\":" + String(ledCount) + ",";
+    json += "\"fx\":" + String(ledFx) + ",";
+    json += "\"r\":" + String(ledR) + ",";
+    json += "\"g\":" + String(ledG) + ",";
+    json += "\"b\":" + String(ledB);
+    json += "}";
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/api/power", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      ledPower = (server.arg("val").toInt() == 1);
+      updateLedBrightness();
+      triggerSave();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/bri", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      ledBrightness = constrain(server.arg("val").toInt(), 0, 255);
+      updateLedBrightness();
+      triggerSave();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/spd", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      ledSpeed = constrain(server.arg("val").toInt(), 5, 100);
+      triggerSave();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/fx", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      ledFx = server.arg("val").toInt();
+      effectStep = 0;
+      triggerSave();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/color", HTTP_GET, []() {
+    if (server.hasArg("r") && server.hasArg("g") && server.hasArg("b")) {
+      ledR = server.arg("r").toInt();
+      ledG = server.arg("g").toInt();
+      ledB = server.arg("b").toInt();
+      triggerSave();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/ledcount", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      int newCount = constrain(server.arg("val").toInt(), 1, 300);
+      if (newCount != ledCount) {
+        ledCount = newCount;
+        initLedStrip();
+        triggerSave();
+      }
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // Tự động nhận diện Captive Portal cho iOS / Android / Windows
+  server.on("/generate_204", HTTP_GET, []() { server.send_P(200, "text/html", INDEX_HTML); });
+  server.on("/gen_204", HTTP_GET, []() { server.send_P(200, "text/html", INDEX_HTML); });
+  server.on("/hotspot-detect.html", HTTP_GET, []() { server.send_P(200, "text/html", INDEX_HTML); });
+  server.on("/canonical.html", HTTP_GET, []() { server.send_P(200, "text/html", INDEX_HTML); });
+  server.on("/connecttest.txt", HTTP_GET, []() { server.send(200, "text/plain", "Microsoft Connect Test"); });
+  server.on("/ncsi.txt", HTTP_GET, []() { server.send(200, "text/plain", "Microsoft NCSI"); });
+
+  server.onNotFound([]() {
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.begin();
+}
+
+// ================= SETUP =================
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(500);
 
-  // Initialize NVS (preserve bonding keys across reboots)
+  // 1. Khởi tạo Flash NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     nvs_flash_erase();
     nvs_flash_init();
   }
 
-  Serial.println("\n======================================");
-  Serial.println("  ESP32-C3 Bluetooth Media Controller ");
-  Serial.println("  Device Name: NAM-DZ");
-  Serial.println("======================================");
+  Serial.println("\n=================================================");
+  Serial.println(" ESP32-C3 SUPER MINI MEDIA & DESK LED CONTROLLER ");
+  Serial.println(" BLE Device: PIXEL-DECK-AUDIO | LED Pin: GPIO 2  ");
+  Serial.println("=================================================");
 
-  // Initialize pins
+  // 2. Khởi động Bluetooth BLE Keyboard TRƯỚC TIÊN (đảm bảo bộ nhớ RAM cho radio Bluetooth)
+  bleKeyboard.begin();
+  Serial.println("BLE Keyboard khoi dong: 'PIXEL-DECK-AUDIO'");
+  delay(150);
+
+  // 3. Tải cài đặt LED đã lưu
+  loadSettings();
+
+  // 4. Khởi tạo dải LED RGB (WS2812B trên GPIO 2)
+  initLedStrip();
+
+  // 5. Khởi tạo chân nút bấm & Encoder
   pinMode(PIN_ENCODER_CLK, INPUT_PULLUP);
   pinMode(PIN_ENCODER_DT,  INPUT_PULLUP);
   
@@ -101,20 +503,33 @@ void setup() {
   btnPlay.begin();
 
   pinMode(PIN_LED, OUTPUT);
-  digitalWrite(PIN_LED, HIGH); // LED OFF initially (active LOW)
+  digitalWrite(PIN_LED, HIGH); // LED xanh tích hợp tắt (active LOW)
 
-  // Initial encoder state
   uint8_t clk = digitalRead(PIN_ENCODER_CLK);
   uint8_t dt  = digitalRead(PIN_ENCODER_DT);
   enc_last_state = (clk << 1) | dt;
 
-  // Start BLE Keyboard
-  bleKeyboard.begin();
-  Serial.println("BLE Keyboard started. Advertising as 'NAM-DZ'...");
+  // 6. Khởi động Wi-Fi Access Point + DNS Server (Captive Portal)
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(apSSID);
+  Serial.print("Wi-Fi AP phát: "); Serial.println(apSSID);
+  Serial.print("IP: "); Serial.println(WiFi.softAPIP());
+
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+  setupWebServer();
 }
 
+// ================= LOOP =================
 void loop() {
-  // 1. Check Encoder Rotation (Volume Control)
+  // 1. Xử lý mạng Wi-Fi & WebServer & Captive Portal
+  dnsServer.processNextRequest();
+  server.handleClient();
+
+  // 2. Chạy hiệu ứng LED RGB
+  runLedEffects();
+  savePendingState();
+
+  // 3. Xử lý núm xoay Encoder (Chỉnh âm lượng Volume)
   uint8_t clk = digitalRead(PIN_ENCODER_CLK);
   uint8_t dt  = digitalRead(PIN_ENCODER_DT);
   uint8_t current_state = (clk << 1) | dt;
@@ -124,7 +539,6 @@ void loop() {
     enc_counter += rot_enc_table[index];
     enc_last_state = current_state;
 
-    // Threshold of 2 transitions per volume step
     if (enc_counter >= 2) {
       if (bleKeyboard.isConnected()) {
         bleKeyboard.write(KEY_MEDIA_VOLUME_UP);
@@ -140,7 +554,7 @@ void loop() {
     }
   }
 
-  // 2. Check Encoder Switch (Play / Pause)
+  // 4. Xử lý nút nhấn trên trục Encoder (Play / Pause)
   if (btnEncoderSW.wasPressed()) {
     Serial.println("[BUTTON] Encoder SW: Play / Pause");
     if (bleKeyboard.isConnected()) {
@@ -148,47 +562,44 @@ void loop() {
     }
   }
 
-  // 3. Check Button Next (GPIO 6)
+  // 5. Nút bấm 1 (GPIO 6): Chuyển bài (Next Track)
   if (btnNext.wasPressed()) {
-    Serial.println("[BUTTON 6] Next Track (Chuyen bai)");
+    Serial.println("[BUTTON 6] Next Track");
     if (bleKeyboard.isConnected()) {
       bleKeyboard.write(KEY_MEDIA_NEXT_TRACK);
     }
   }
 
-  // 4. Check Button Prev (GPIO 7)
+  // 6. Nút bấm 2 (GPIO 7): Lùi bài (Previous Track)
   if (btnPrev.wasPressed()) {
-    Serial.println("[BUTTON 7] Previous Track (Back lai)");
+    Serial.println("[BUTTON 7] Previous Track");
     if (bleKeyboard.isConnected()) {
       bleKeyboard.write(KEY_MEDIA_PREVIOUS_TRACK);
     }
   }
 
-  // 5. Check Button Play/Pause (GPIO 10)
+  // 7. Nút bấm 3 (GPIO 10): Dừng / Phát (Play / Pause)
   if (btnPlay.wasPressed()) {
-    Serial.println("[BUTTON 10] Play / Pause (Dung phat)");
+    Serial.println("[BUTTON 10] Play / Pause");
     if (bleKeyboard.isConnected()) {
       bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
     }
   }
 
-  // 6. LED Status Indicator
+  // 8. Đèn LED báo trạng thái Bluetooth trên bo mạch (GPIO 8)
   static uint32_t lastLedBlink = 0;
-  static bool ledState = false;
+  static bool ledBlinkState = false;
   uint32_t now = millis();
 
   if (bleKeyboard.isConnected()) {
-    // Solid ON when connected (active LOW)
-    digitalWrite(PIN_LED, LOW);
+    digitalWrite(PIN_LED, LOW); // Đã kết nối: LED xanh sáng đứng
   } else {
-    // Blink every 500ms when waiting for connection
     if (now - lastLedBlink >= 500) {
       lastLedBlink = now;
-      ledState = !ledState;
-      digitalWrite(PIN_LED, ledState ? LOW : HIGH);
+      ledBlinkState = !ledBlinkState;
+      digitalWrite(PIN_LED, ledBlinkState ? LOW : HIGH);
     }
   }
 
-  // Small delay to prevent tight loop CPU spinning
-  delayMicroseconds(500);
+  delay(1);
 }
