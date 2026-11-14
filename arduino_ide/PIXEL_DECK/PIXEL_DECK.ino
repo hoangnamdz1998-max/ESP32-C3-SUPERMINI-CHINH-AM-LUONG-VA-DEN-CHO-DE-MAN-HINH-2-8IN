@@ -23,7 +23,7 @@
 #define PIN_LED           8
 
 // 4. Chân điều khiển LED dây RGB WS2812B (Data Pin)
-#define PIN_LED_STRIP     2
+#define PIN_LED_STRIP     1
 
 // ================= BLE Keyboard Instance =================
 BleKeyboard bleKeyboard("PIXEL-DECK-AUDIO", "NAM", 100);
@@ -230,9 +230,9 @@ void runLedEffects() {
   // Tốc độ khung hình (Speed: 5 - 100)
   unsigned long interval;
   if (ledFx == 3) {
-    interval = map(105 - ledSpeed, 5, 100, 15, 60); // Cầu vồng làm tươi 60 - 16 FPS mượt mà
+    interval = map(105 - ledSpeed, 5, 100, 30, 75); // 30ms - 75ms: nhịp quét ổn định mượt mà, triệt tiêu xung đột ngắt
   } else {
-    interval = map(105 - ledSpeed, 5, 100, 20, 160);
+    interval = map(105 - ledSpeed, 5, 100, 25, 160);
   }
   if (millis() - lastEffectUpdate < interval) return;
   lastEffectUpdate = millis();
@@ -520,7 +520,7 @@ void setup() {
 
   Serial.println("\n=================================================");
   Serial.println(" ESP32-C3 SUPER MINI MEDIA & DESK LED CONTROLLER ");
-  Serial.println(" BLE Device: PIXEL-DECK-AUDIO | LED Pin: GPIO 2  ");
+  Serial.println(" BLE Device: PIXEL-DECK-AUDIO | LED Pin: GPIO 1  ");
   Serial.println("=================================================");
 
   // 2. Khởi động Bluetooth BLE Keyboard TRƯỚC TIÊN (đảm bảo bộ nhớ RAM cho radio Bluetooth)
@@ -552,6 +552,7 @@ void setup() {
 
   // 6. Khởi động Wi-Fi Access Point + DNS Server (Captive Portal)
   WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false); // Vô hiệu hóa WiFi modem sleep để giữ xung APB cố định 100%, chống giật RMT cho LED
   WiFi.softAP(apSSID);
   Serial.print("Wi-Fi AP phát: "); Serial.println(apSSID);
   Serial.print("IP: "); Serial.println(WiFi.softAPIP());

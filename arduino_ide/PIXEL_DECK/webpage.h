@@ -175,7 +175,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     <div class="card">
       <div class="card-title">
         <span>Chọn Hiệu Ứng LED</span>
-        <span class="badge-pin">Chân LED: GPIO 2</span>
+        <span class="badge-pin">Chân LED: GPIO 1</span>
       </div>
       <div class="effects-grid" id="effectsGrid">
         <div class="effect-btn featured active" onclick="setEffect(1)">
