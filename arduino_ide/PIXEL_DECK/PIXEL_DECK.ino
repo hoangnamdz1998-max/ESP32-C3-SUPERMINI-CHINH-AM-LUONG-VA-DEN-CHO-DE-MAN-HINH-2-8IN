@@ -92,9 +92,9 @@ Adafruit_NeoPixel* ledStrip = nullptr;
 
 // Trạng thái LED
 bool ledPower = true;
-uint8_t ledBrightness = 255;
+uint8_t ledBrightness = 150;
 uint8_t ledSpeed = 50;
-int ledCount = 60;
+int ledCount = 19;
 uint8_t ledFx = 1;            // Mặc định: Hiệu ứng 1 (Center Out - Chạy từ giữa ra 2 đầu)
 uint8_t ledR = 255;
 uint8_t ledG = 107;
@@ -131,10 +131,10 @@ void updateLedBrightness() {
 void loadSettings() {
   prefs.begin("deskled", true);
   ledPower = prefs.getBool("power", true);
-  ledBrightness = prefs.getUChar("bri", 255);
+  ledBrightness = prefs.getUChar("bri", 150);
   ledSpeed = prefs.getUChar("spd", 50);
-  ledCount = prefs.getInt("count", 60);
-  if (ledCount < 1 || ledCount > 300) ledCount = 60;
+  ledCount = prefs.getInt("count", 19);
+  if (ledCount < 1 || ledCount > 300) ledCount = 19;
   ledFx = prefs.getUChar("fx", 1);
   ledR = prefs.getUChar("r", 255);
   ledG = prefs.getUChar("g", 107);
@@ -148,7 +148,7 @@ void triggerSave() {
 }
 
 void savePendingState() {
-  if (needSaveState && (millis() - saveTriggerTime > 800)) {
+  if (needSaveState && (millis() - saveTriggerTime > 2000)) {
     needSaveState = false;
     prefs.begin("deskled", false);
     prefs.putBool("power", ledPower);
@@ -201,22 +201,18 @@ void runLedEffects() {
       ledStrip->show();
       break;
 
-    case 1: { // 🌟 TỪ GIỮA DÂY CHẠY RA 2 ĐẦU (Center Out)
+    case 1: { // 🌟 TỪ GIỮA DÂY TỎA RA 2 ĐẦU & GIỮ SÁNG (Center-Out Fill)
       float mid = (ledCount - 1) / 2.0;
       int halfLen = (ledCount + 1) / 2;
+      int totalSteps = halfLen * 2 + 10;
+      int step = effectStep % totalSteps;
 
-      // 1. Fade nhẹ các pixel cũ để tạo vệt đuôi ánh sáng sao băng
-      for (int i = 0; i < ledCount; i++) {
-        uint32_t c = ledStrip->getPixelColor(i);
-        uint8_t r = ((c >> 16) & 0xFF) * 0.75;
-        uint8_t g = ((c >> 8) & 0xFF) * 0.75;
-        uint8_t b = (c & 0xFF) * 0.75;
-        ledStrip->setPixelColor(i, r, g, b);
+      if (step == 0) {
+        ledStrip->clear();
       }
 
-      // 2. Tỏa điểm sáng từ tâm ra 2 đầu
-      int step = effectStep % (halfLen + 4);
       if (step < halfLen) {
+        // Giai đoạn 1: Mở rộng từ tâm ra 2 đầu, CÁC BÓNG ĐÃ CHẠY QUA VẪN GIỮ SÁNG
         int leftIdx = (int)floor(mid - step);
         int rightIdx = (int)ceil(mid + step);
         if (leftIdx >= 0 && leftIdx < ledCount) {
@@ -225,6 +221,19 @@ void runLedEffects() {
         if (rightIdx >= 0 && rightIdx < ledCount) {
           ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
         }
+      } else if (step < halfLen + 6) {
+        // Giai đoạn 2: Giữ sáng toàn bộ dải LED một nhịp
+      } else if (step < halfLen * 2 + 6) {
+        // Giai đoạn 3: Tắt dần từ giữa ra 2 đầu theo nhịp thở êm
+        int unstep = step - (halfLen + 6);
+        int leftIdx = (int)floor(mid - unstep);
+        int rightIdx = (int)ceil(mid + unstep);
+        if (leftIdx >= 0 && leftIdx < ledCount) {
+          ledStrip->setPixelColor(leftIdx, 0, 0, 0);
+        }
+        if (rightIdx >= 0 && rightIdx < ledCount) {
+          ledStrip->setPixelColor(rightIdx, 0, 0, 0);
+        }
       }
 
       ledStrip->show();
@@ -232,19 +241,16 @@ void runLedEffects() {
       break;
     }
 
-    case 2: { // TỪ 2 ĐẦU DỒN VÀO GIỮA (Edges In)
+    case 2: { // TỪ 2 ĐẦU DỒN VÀO GIỮA & GIỮ SÁNG (Edges In Fill)
       float mid = (ledCount - 1) / 2.0;
       int halfLen = (ledCount + 1) / 2;
+      int totalSteps = halfLen * 2 + 10;
+      int step = effectStep % totalSteps;
 
-      for (int i = 0; i < ledCount; i++) {
-        uint32_t c = ledStrip->getPixelColor(i);
-        uint8_t r = ((c >> 16) & 0xFF) * 0.75;
-        uint8_t g = ((c >> 8) & 0xFF) * 0.75;
-        uint8_t b = (c & 0xFF) * 0.75;
-        ledStrip->setPixelColor(i, r, g, b);
+      if (step == 0) {
+        ledStrip->clear();
       }
 
-      int step = effectStep % (halfLen + 4);
       if (step < halfLen) {
         int leftIdx = step;
         int rightIdx = ledCount - 1 - step;
@@ -254,6 +260,18 @@ void runLedEffects() {
         if (rightIdx >= 0 && rightIdx < ledCount) {
           ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
         }
+      } else if (step < halfLen + 6) {
+        // Giữ sáng toàn bộ dải đèn
+      } else if (step < halfLen * 2 + 6) {
+        int unstep = step - (halfLen + 6);
+        int leftIdx = unstep;
+        int rightIdx = ledCount - 1 - unstep;
+        if (leftIdx >= 0 && leftIdx < ledCount) {
+          ledStrip->setPixelColor(leftIdx, 0, 0, 0);
+        }
+        if (rightIdx >= 0 && rightIdx < ledCount) {
+          ledStrip->setPixelColor(rightIdx, 0, 0, 0);
+        }
       }
 
       ledStrip->show();
@@ -261,12 +279,14 @@ void runLedEffects() {
       break;
     }
 
-    case 3: { // Cầu vồng cuộn (Rainbow Cycle)
+    case 3: { // Cầu vồng cuộn mượt mà (Rainbow Cycle - Không nháy, 16-bit HSV)
+      uint16_t baseHue = effectStep * 256;
       for (int i = 0; i < ledCount; i++) {
-        ledStrip->setPixelColor(i, Wheel(((i * 256 / ledCount) + effectStep) & 255));
+        uint16_t pixelHue = baseHue + (i * 65536L / ledCount);
+        ledStrip->setPixelColor(i, ledStrip->gamma32(ledStrip->ColorHSV(pixelHue)));
       }
       ledStrip->show();
-      effectStep = (effectStep + 2) & 255;
+      effectStep++;
       break;
     }
 
