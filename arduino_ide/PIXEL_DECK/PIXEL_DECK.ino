@@ -82,6 +82,31 @@ static const int8_t rot_enc_table[] = {
 static uint8_t enc_last_state = 0;
 static int8_t enc_counter = 0;
 
+// Bảng màu cài sẵn (Preset Colors) để đổi nhanh bằng nút bấm
+struct ColorPreset {
+  uint8_t r, g, b;
+  const char* name;
+};
+
+const ColorPreset PRESET_COLORS[] = {
+  {255, 107,   0, "Cam WLED"},
+  {255,   0,   0, "Đỏ"},
+  {255,  40,   0, "Đỏ cam"},
+  {255, 140,   0, "Cam tươi"},
+  {255, 215,   0, "Vàng nắng"},
+  {  0, 255,   0, "Xanh lục"},
+  {  0, 255, 128, "Xanh Mint"},
+  {  0, 220, 255, "Xanh Cyan"},
+  {  0, 100, 255, "Xanh dương"},
+  {128,   0, 255, "Tím"},
+  {220,   0, 255, "Tím hồng"},
+  {255,   0, 100, "Hồng"},
+  {255, 200, 150, "Trắng ấm"},
+  {220, 240, 255, "Trắng lạnh"}
+};
+const int TOTAL_PRESET_COLORS = sizeof(PRESET_COLORS) / sizeof(PRESET_COLORS[0]);
+static int currentPresetColorIdx = 0;
+
 // ================= LED Strip & WebServer Configuration =================
 #define DNS_PORT 53
 WebServer server(80);
@@ -549,7 +574,25 @@ void loop() {
   runLedEffects();
   savePendingState();
 
-  // 3. Xử lý núm xoay Encoder (Chỉnh âm lượng Volume)
+  // Đọc trạng thái các chân vật lý (Active LOW: LOW = đang nhấn)
+  bool nextPinLow = (digitalRead(PIN_BTN_NEXT) == LOW);
+  bool prevPinLow = (digitalRead(PIN_BTN_PREV) == LOW);
+  bool playPinLow = (digitalRead(PIN_BTN_PLAY) == LOW);
+  bool swPinLow   = (digitalRead(PIN_ENCODER_SW) == LOW);
+  bool isHoldingPlay = playPinLow || swPinLow;
+
+  static bool swUsedForEncoder = false;
+  static bool playUsedForEncoder = false;
+  static bool comboActive = false;
+
+  // Khi nhả hết các nút thì giải phóng cờ combo
+  if (!nextPinLow && !prevPinLow && !playPinLow && !swPinLow) {
+    comboActive = false;
+    swUsedForEncoder = false;
+    playUsedForEncoder = false;
+  }
+
+  // 3. Xử lý núm xoay Encoder (Chỉnh âm lượng hoặc Tăng/Giảm tốc độ hiệu ứng)
   uint8_t clk = digitalRead(PIN_ENCODER_CLK);
   uint8_t dt  = digitalRead(PIN_ENCODER_DT);
   uint8_t current_state = (clk << 1) | dt;
@@ -559,59 +602,76 @@ void loop() {
     enc_counter += rot_enc_table[index];
     enc_last_state = current_state;
 
-    if (enc_counter >= 2) {
-      if (bleKeyboard.isConnected()) {
-        bleKeyboard.write(KEY_MEDIA_VOLUME_UP);
+    // ĐÃ ĐỔI CHIỀU XOAY THEO YÊU CẦU:
+    // enc_counter <= -2: Chiều tăng (Volume UP / Tăng tốc độ LED)
+    // enc_counter >= 2:  Chiều giảm (Volume DOWN / Giảm tốc độ LED)
+    if (enc_counter <= -2) {
+      if (isHoldingPlay) {
+        // Nhấn nút dừng phát và xoay -> TĂNG TỐC ĐỘ HIỆU ỨNG
+        ledSpeed = min(100, (int)ledSpeed + 5);
+        Serial.printf("[ENCODER + PLAY] Tăng tốc độ hiệu ứng: %d%%%%\n", ledSpeed);
+        if (swPinLow) swUsedForEncoder = true;
+        if (playPinLow) playUsedForEncoder = true;
+        triggerSave();
+      } else {
+        // Xoay bình thường -> TĂNG ÂM LƯỢNG (Đã đảo chiều chuẩn)
+        if (bleKeyboard.isConnected()) {
+          bleKeyboard.write(KEY_MEDIA_VOLUME_UP);
+        }
+        Serial.println("[ENCODER] Volume UP (+)");
       }
-      Serial.println("[ENCODER] Volume UP (+)");
       enc_counter = 0;
-    } else if (enc_counter <= -2) {
-      if (bleKeyboard.isConnected()) {
-        bleKeyboard.write(KEY_MEDIA_VOLUME_DOWN);
+    } else if (enc_counter >= 2) {
+      if (isHoldingPlay) {
+        // Nhấn nút dừng phát và xoay -> GIẢM TỐC ĐỘ HIỆU ỨNG
+        ledSpeed = max(5, (int)ledSpeed - 5);
+        Serial.printf("[ENCODER + PLAY] Giảm tốc độ hiệu ứng: %d%%%%\n", ledSpeed);
+        if (swPinLow) swUsedForEncoder = true;
+        if (playPinLow) playUsedForEncoder = true;
+        triggerSave();
+      } else {
+        // Xoay bình thường -> GIẢM ÂM LƯỢNG (Đã đảo chiều chuẩn)
+        if (bleKeyboard.isConnected()) {
+          bleKeyboard.write(KEY_MEDIA_VOLUME_DOWN);
+        }
+        Serial.println("[ENCODER] Volume DOWN (-)");
       }
-      Serial.println("[ENCODER] Volume DOWN (-)");
       enc_counter = 0;
     }
   }
 
   // 4. Xử lý nút nhấn trên trục Encoder (Play / Pause)
   if (btnEncoderSW.wasPressed()) {
-    Serial.println("[BUTTON] Encoder SW: Play / Pause");
-    if (bleKeyboard.isConnected()) {
-      bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+    if (!swUsedForEncoder) {
+      Serial.println("[BUTTON] Encoder SW: Play / Pause");
+      if (bleKeyboard.isConnected()) {
+        bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+      }
     }
   }
 
-  // 5 & 6. Xử lý nút bấm Next (GPIO 6), Prev (GPIO 7) và COMBO BẤM CẢ 2 NÚT ĐỂ ĐỔI HIỆU ỨNG LED
+  // 5, 6 & 7. Xử lý nút bấm Next (GPIO 6), Prev (GPIO 7), Play (GPIO 10) và các COMBO 2 NÚT
   static unsigned long btnNextPressTime = 0;
   static unsigned long btnPrevPressTime = 0;
+  static unsigned long btnPlayPressTime = 0;
   static bool nextPending = false;
   static bool prevPending = false;
-  static bool comboActive = false;
-  const unsigned long COMBO_WINDOW_MS = 80; // Cửa sổ 80ms để nhận diện bấm đồng thời 2 nút
+  static bool playPending = false;
+  const unsigned long COMBO_WINDOW_MS = 80;
 
-  bool nextPinLow = (digitalRead(PIN_BTN_NEXT) == LOW);
-  bool prevPinLow = (digitalRead(PIN_BTN_PREV) == LOW);
-
-  // Khi cả 2 nút đều đã nhả ra thì giải phóng cờ combo
-  if (!nextPinLow && !prevPinLow) {
-    comboActive = false;
-  }
-
-  // Lambda hàm chuyển hiệu ứng khi bấm combo 2 nút
+  // Lambda: Combo Next + Prev -> Đổi hiệu ứng LED
   auto triggerEffectCombo = [&]() {
     nextPending = false;
     prevPending = false;
+    playPending = false;
     comboActive = true;
 
-    // Chuyển sang hiệu ứng kế tiếp (0 -> 10)
     ledFx = (ledFx + 1) % 11;
     effectStep = 0;
     triggerSave();
 
-    Serial.printf("[COMBO 2 NÚT] Bấm cùng lúc Next + Prev -> Đổi hiệu ứng LED: #%d\n", ledFx);
+    Serial.printf("[COMBO Next + Prev] Đổi hiệu ứng LED: #%d\n", ledFx);
 
-    // Chớp trắng nhanh báo hiệu đã chuyển hiệu ứng thành công
     if (ledStrip && ledPower) {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(255, 255, 255));
@@ -621,11 +681,60 @@ void loop() {
     }
   };
 
+  // Lambda: Combo Play + Next -> Đổi màu tiếp theo
+  auto triggerColorNextCombo = [&]() {
+    nextPending = false;
+    prevPending = false;
+    playPending = false;
+    comboActive = true;
+
+    currentPresetColorIdx = (currentPresetColorIdx + 1) % TOTAL_PRESET_COLORS;
+    ledR = PRESET_COLORS[currentPresetColorIdx].r;
+    ledG = PRESET_COLORS[currentPresetColorIdx].g;
+    ledB = PRESET_COLORS[currentPresetColorIdx].b;
+    triggerSave();
+
+    Serial.printf("[COMBO Play + Next] Đổi màu tiếp theo: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
+
+    if (ledStrip && ledPower) {
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(ledR, ledG, ledB));
+      }
+      ledStrip->show();
+      delay(40);
+    }
+  };
+
+  // Lambda: Combo Play + Prev -> Đổi màu trước đó
+  auto triggerColorPrevCombo = [&]() {
+    nextPending = false;
+    prevPending = false;
+    playPending = false;
+    comboActive = true;
+
+    currentPresetColorIdx = (currentPresetColorIdx - 1 + TOTAL_PRESET_COLORS) % TOTAL_PRESET_COLORS;
+    ledR = PRESET_COLORS[currentPresetColorIdx].r;
+    ledG = PRESET_COLORS[currentPresetColorIdx].g;
+    ledB = PRESET_COLORS[currentPresetColorIdx].b;
+    triggerSave();
+
+    Serial.printf("[COMBO Play + Prev] Đổi màu trước đó: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
+
+    if (ledStrip && ledPower) {
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(ledR, ledG, ledB));
+      }
+      ledStrip->show();
+      delay(40);
+    }
+  };
+
   // Kiểm tra sự kiện bấm nút Next
   if (btnNext.wasPressed()) {
     if (!comboActive) {
-      if (prevPinLow) {
-        // Nút Prev đang giữ sẵn -> Kích hoạt Combo!
+      if (playPinLow) {
+        triggerColorNextCombo();
+      } else if (prevPinLow) {
         triggerEffectCombo();
       } else {
         nextPending = true;
@@ -637,8 +746,9 @@ void loop() {
   // Kiểm tra sự kiện bấm nút Prev
   if (btnPrev.wasPressed()) {
     if (!comboActive) {
-      if (nextPinLow) {
-        // Nút Next đang giữ sẵn -> Kích hoạt Combo!
+      if (playPinLow) {
+        triggerColorPrevCombo();
+      } else if (nextPinLow) {
         triggerEffectCombo();
       } else {
         prevPending = true;
@@ -647,9 +757,25 @@ void loop() {
     }
   }
 
-  // Xử lý nút Next sau thời gian chờ combo
+  // Kiểm tra sự kiện bấm nút Play (GPIO 10)
+  if (btnPlay.wasPressed()) {
+    if (!comboActive && !playUsedForEncoder) {
+      if (nextPinLow) {
+        triggerColorNextCombo();
+      } else if (prevPinLow) {
+        triggerColorPrevCombo();
+      } else {
+        playPending = true;
+        btnPlayPressTime = millis();
+      }
+    }
+  }
+
+  // Xử lý nút Next sau cửa sổ chờ combo
   if (nextPending) {
-    if (prevPinLow || (digitalRead(PIN_BTN_PREV) == LOW)) {
+    if (playPinLow || (digitalRead(PIN_BTN_PLAY) == LOW)) {
+      triggerColorNextCombo();
+    } else if (prevPinLow || (digitalRead(PIN_BTN_PREV) == LOW)) {
       triggerEffectCombo();
     } else if (millis() - btnNextPressTime > COMBO_WINDOW_MS) {
       nextPending = false;
@@ -662,9 +788,11 @@ void loop() {
     }
   }
 
-  // Xử lý nút Prev sau thời gian chờ combo
+  // Xử lý nút Prev sau cửa sổ chờ combo
   if (prevPending) {
-    if (nextPinLow || (digitalRead(PIN_BTN_NEXT) == LOW)) {
+    if (playPinLow || (digitalRead(PIN_BTN_PLAY) == LOW)) {
+      triggerColorPrevCombo();
+    } else if (nextPinLow || (digitalRead(PIN_BTN_NEXT) == LOW)) {
       triggerEffectCombo();
     } else if (millis() - btnPrevPressTime > COMBO_WINDOW_MS) {
       prevPending = false;
@@ -677,11 +805,20 @@ void loop() {
     }
   }
 
-  // 7. Nút bấm 3 (GPIO 10): Dừng / Phát (Play / Pause)
-  if (btnPlay.wasPressed()) {
-    Serial.println("[BUTTON 10] Play / Pause");
-    if (bleKeyboard.isConnected()) {
-      bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+  // Xử lý nút Play sau cửa sổ chờ combo
+  if (playPending) {
+    if (nextPinLow || (digitalRead(PIN_BTN_NEXT) == LOW)) {
+      triggerColorNextCombo();
+    } else if (prevPinLow || (digitalRead(PIN_BTN_PREV) == LOW)) {
+      triggerColorPrevCombo();
+    } else if (millis() - btnPlayPressTime > COMBO_WINDOW_MS) {
+      playPending = false;
+      if (!comboActive && !playUsedForEncoder) {
+        Serial.println("[BUTTON 10] Play / Pause");
+        if (bleKeyboard.isConnected()) {
+          bleKeyboard.write(KEY_MEDIA_PLAY_PAUSE);
+        }
+      }
     }
   }
 
