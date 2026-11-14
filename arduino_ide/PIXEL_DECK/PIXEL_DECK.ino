@@ -126,6 +126,8 @@ uint8_t ledG = 107;
 uint8_t ledB = 0;
 
 uint16_t effectStep = 0;
+bool rainbowReverse = false;
+uint16_t rainbowHue = 0;
 unsigned long lastEffectUpdate = 0;
 
 bool needSaveState = false;
@@ -164,6 +166,7 @@ void loadSettings() {
   ledR = prefs.getUChar("r", 255);
   ledG = prefs.getUChar("g", 107);
   ledB = prefs.getUChar("b", 0);
+  rainbowReverse = prefs.getBool("rb_rev", false);
   prefs.end();
 }
 
@@ -184,6 +187,7 @@ void savePendingState() {
     prefs.putUChar("r", ledR);
     prefs.putUChar("g", ledG);
     prefs.putUChar("b", ledB);
+    prefs.putBool("rb_rev", rainbowReverse);
     prefs.end();
     Serial.println("[NVS] Da luu cau hinh LED vao Flash.");
   }
@@ -214,7 +218,12 @@ void runLedEffects() {
   }
 
   // Tốc độ khung hình (Speed: 5 - 100)
-  unsigned long interval = map(105 - ledSpeed, 5, 100, 10, 150);
+  unsigned long interval;
+  if (ledFx == 3) {
+    interval = map(105 - ledSpeed, 5, 100, 15, 60); // Cầu vồng làm tươi 60 - 16 FPS mượt mà
+  } else {
+    interval = map(105 - ledSpeed, 5, 100, 20, 160);
+  }
   if (millis() - lastEffectUpdate < interval) return;
   lastEffectUpdate = millis();
 
@@ -226,92 +235,59 @@ void runLedEffects() {
       ledStrip->show();
       break;
 
-    case 1: { // 🌟 TỪ GIỮA DÂY TỎA RA 2 ĐẦU & GIỮ SÁNG (Center-Out Fill)
-      float mid = (ledCount - 1) / 2.0;
-      int halfLen = (ledCount + 1) / 2;
-      int totalSteps = halfLen * 2 + 10;
-      int step = effectStep % totalSteps;
-
-      if (step == 0) {
-        ledStrip->clear();
-      }
-
-      if (step < halfLen) {
-        // Giai đoạn 1: Mở rộng từ tâm ra 2 đầu, CÁC BÓNG ĐÃ CHẠY QUA VẪN GIỮ SÁNG
-        int leftIdx = (int)floor(mid - step);
-        int rightIdx = (int)ceil(mid + step);
-        if (leftIdx >= 0 && leftIdx < ledCount) {
-          ledStrip->setPixelColor(leftIdx, ledR, ledG, ledB);
-        }
-        if (rightIdx >= 0 && rightIdx < ledCount) {
-          ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
-        }
-      } else if (step < halfLen + 6) {
-        // Giai đoạn 2: Giữ sáng toàn bộ dải LED một nhịp
-      } else if (step < halfLen * 2 + 6) {
-        // Giai đoạn 3: Tắt dần từ giữa ra 2 đầu theo nhịp thở êm
-        int unstep = step - (halfLen + 6);
-        int leftIdx = (int)floor(mid - unstep);
-        int rightIdx = (int)ceil(mid + unstep);
-        if (leftIdx >= 0 && leftIdx < ledCount) {
-          ledStrip->setPixelColor(leftIdx, 0, 0, 0);
-        }
-        if (rightIdx >= 0 && rightIdx < ledCount) {
-          ledStrip->setPixelColor(rightIdx, 0, 0, 0);
-        }
-      }
-
-      ledStrip->show();
-      effectStep++;
-      break;
-    }
-
-    case 2: { // TỪ 2 ĐẦU DỒN VÀO GIỮA & GIỮ SÁNG (Edges In Fill)
-      float mid = (ledCount - 1) / 2.0;
-      int halfLen = (ledCount + 1) / 2;
-      int totalSteps = halfLen * 2 + 10;
-      int step = effectStep % totalSteps;
-
-      if (step == 0) {
-        ledStrip->clear();
-      }
-
-      if (step < halfLen) {
-        int leftIdx = step;
-        int rightIdx = ledCount - 1 - step;
-        if (leftIdx >= 0 && leftIdx < ledCount) {
-          ledStrip->setPixelColor(leftIdx, ledR, ledG, ledB);
-        }
-        if (rightIdx >= 0 && rightIdx < ledCount) {
-          ledStrip->setPixelColor(rightIdx, ledR, ledG, ledB);
-        }
-      } else if (step < halfLen + 6) {
-        // Giữ sáng toàn bộ dải đèn
-      } else if (step < halfLen * 2 + 6) {
-        int unstep = step - (halfLen + 6);
-        int leftIdx = unstep;
-        int rightIdx = ledCount - 1 - unstep;
-        if (leftIdx >= 0 && leftIdx < ledCount) {
-          ledStrip->setPixelColor(leftIdx, 0, 0, 0);
-        }
-        if (rightIdx >= 0 && rightIdx < ledCount) {
-          ledStrip->setPixelColor(rightIdx, 0, 0, 0);
-        }
-      }
-
-      ledStrip->show();
-      effectStep++;
-      break;
-    }
-
-    case 3: { // Cầu vồng cuộn mượt mà (Rainbow Cycle - Không nháy, 16-bit HSV)
-      uint16_t baseHue = effectStep * 256;
+    case 1: { // 🌟 TỪ GIỮA RA 2 ĐẦU: Toàn bộ sáng, chỉ 2 bóng tắt chạy từ giữa ra 2 mép
       for (int i = 0; i < ledCount; i++) {
-        uint16_t pixelHue = baseHue + (i * 65536L / ledCount);
+        ledStrip->setPixelColor(i, ledR, ledG, ledB);
+      }
+      float mid = (ledCount - 1) / 2.0;
+      int halfLen = (ledCount + 1) / 2;
+      int step = effectStep % halfLen;
+
+      int leftIdx = (int)floor(mid - step);
+      int rightIdx = (int)ceil(mid + step);
+      if (leftIdx >= 0 && leftIdx < ledCount) {
+        ledStrip->setPixelColor(leftIdx, 0, 0, 0);
+      }
+      if (rightIdx >= 0 && rightIdx < ledCount) {
+        ledStrip->setPixelColor(rightIdx, 0, 0, 0);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 2: { // 🔄 TỪ 2 ĐẦU VÀO GIỮA: Toàn bộ sáng, chỉ 2 bóng tắt chạy từ 2 mép vào giữa
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, ledR, ledG, ledB);
+      }
+      int halfLen = (ledCount + 1) / 2;
+      int step = effectStep % halfLen;
+
+      int leftIdx = step;
+      int rightIdx = ledCount - 1 - step;
+      if (leftIdx >= 0 && leftIdx < ledCount) {
+        ledStrip->setPixelColor(leftIdx, 0, 0, 0);
+      }
+      if (rightIdx >= 0 && rightIdx < ledCount) {
+        ledStrip->setPixelColor(rightIdx, 0, 0, 0);
+      }
+      ledStrip->show();
+      effectStep++;
+      break;
+    }
+
+    case 3: { // 🌈 Cầu vồng cuộn siêu mượt (Rainbow Cycle - Không chớp, hỗ trợ đổi chiều)
+      uint16_t hueStep = map(ledSpeed, 5, 100, 120, 1000);
+      if (rainbowReverse) {
+        rainbowHue -= hueStep;
+      } else {
+        rainbowHue += hueStep;
+      }
+      for (int i = 0; i < ledCount; i++) {
+        uint16_t pixelHue = rainbowHue + (i * 65536L / ledCount);
         ledStrip->setPixelColor(i, ledStrip->gamma32(ledStrip->ColorHSV(pixelHue)));
       }
       ledStrip->show();
-      effectStep++;
       break;
     }
 
@@ -461,6 +437,16 @@ void setupWebServer() {
       triggerSave();
     }
     server.send(200, "text/plain", "OK");
+  });
+
+  server.on("/api/rainbow_dir", HTTP_GET, []() {
+    if (server.hasArg("val")) {
+      rainbowReverse = (server.arg("val").toInt() == 1);
+    } else {
+      rainbowReverse = !rainbowReverse;
+    }
+    triggerSave();
+    server.send(200, "text/plain", rainbowReverse ? "1" : "0");
   });
 
   server.on("/api/fx", HTTP_GET, []() {
@@ -659,7 +645,7 @@ void loop() {
   static bool playPending = false;
   const unsigned long COMBO_WINDOW_MS = 80;
 
-  // Lambda: Combo Next + Prev -> Đổi hiệu ứng LED
+  // Lambda: Combo Next + Prev -> Đổi hiệu ứng LED (Mượt mà, không chớp nháy trắng)
   auto triggerEffectCombo = [&]() {
     nextPending = false;
     prevPending = false;
@@ -671,61 +657,47 @@ void loop() {
     triggerSave();
 
     Serial.printf("[COMBO Next + Prev] Đổi hiệu ứng LED: #%d\n", ledFx);
-
-    if (ledStrip && ledPower) {
-      for (int i = 0; i < ledCount; i++) {
-        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(255, 255, 255));
-      }
-      ledStrip->show();
-      delay(40);
-    }
   };
 
-  // Lambda: Combo Play + Next -> Đổi màu tiếp theo
+  // Lambda: Combo Play + Next -> Đổi chiều Cầu vồng (nếu Fx 3) hoặc Đổi màu tiếp theo
   auto triggerColorNextCombo = [&]() {
     nextPending = false;
     prevPending = false;
     playPending = false;
     comboActive = true;
 
-    currentPresetColorIdx = (currentPresetColorIdx + 1) % TOTAL_PRESET_COLORS;
-    ledR = PRESET_COLORS[currentPresetColorIdx].r;
-    ledG = PRESET_COLORS[currentPresetColorIdx].g;
-    ledB = PRESET_COLORS[currentPresetColorIdx].b;
-    triggerSave();
-
-    Serial.printf("[COMBO Play + Next] Đổi màu tiếp theo: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
-
-    if (ledStrip && ledPower) {
-      for (int i = 0; i < ledCount; i++) {
-        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(ledR, ledG, ledB));
-      }
-      ledStrip->show();
-      delay(40);
+    if (ledFx == 3) {
+      rainbowReverse = !rainbowReverse;
+      triggerSave();
+      Serial.printf("[COMBO Play + Next] Đổi chiều Cầu vồng: %s\n", rainbowReverse ? "Nghịch (⬅️)" : "Thuận (➡️)");
+    } else {
+      currentPresetColorIdx = (currentPresetColorIdx + 1) % TOTAL_PRESET_COLORS;
+      ledR = PRESET_COLORS[currentPresetColorIdx].r;
+      ledG = PRESET_COLORS[currentPresetColorIdx].g;
+      ledB = PRESET_COLORS[currentPresetColorIdx].b;
+      triggerSave();
+      Serial.printf("[COMBO Play + Next] Đổi màu tiếp theo: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
     }
   };
 
-  // Lambda: Combo Play + Prev -> Đổi màu trước đó
+  // Lambda: Combo Play + Prev -> Đổi chiều Cầu vồng (nếu Fx 3) hoặc Lùi màu trước đó
   auto triggerColorPrevCombo = [&]() {
     nextPending = false;
     prevPending = false;
     playPending = false;
     comboActive = true;
 
-    currentPresetColorIdx = (currentPresetColorIdx - 1 + TOTAL_PRESET_COLORS) % TOTAL_PRESET_COLORS;
-    ledR = PRESET_COLORS[currentPresetColorIdx].r;
-    ledG = PRESET_COLORS[currentPresetColorIdx].g;
-    ledB = PRESET_COLORS[currentPresetColorIdx].b;
-    triggerSave();
-
-    Serial.printf("[COMBO Play + Prev] Đổi màu trước đó: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
-
-    if (ledStrip && ledPower) {
-      for (int i = 0; i < ledCount; i++) {
-        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(ledR, ledG, ledB));
-      }
-      ledStrip->show();
-      delay(40);
+    if (ledFx == 3) {
+      rainbowReverse = !rainbowReverse;
+      triggerSave();
+      Serial.printf("[COMBO Play + Prev] Đổi chiều Cầu vồng: %s\n", rainbowReverse ? "Nghịch (⬅️)" : "Thuận (➡️)");
+    } else {
+      currentPresetColorIdx = (currentPresetColorIdx - 1 + TOTAL_PRESET_COLORS) % TOTAL_PRESET_COLORS;
+      ledR = PRESET_COLORS[currentPresetColorIdx].r;
+      ledG = PRESET_COLORS[currentPresetColorIdx].g;
+      ledB = PRESET_COLORS[currentPresetColorIdx].b;
+      triggerSave();
+      Serial.printf("[COMBO Play + Prev] Đổi màu trước đó: %s\n", PRESET_COLORS[currentPresetColorIdx].name);
     }
   };
 

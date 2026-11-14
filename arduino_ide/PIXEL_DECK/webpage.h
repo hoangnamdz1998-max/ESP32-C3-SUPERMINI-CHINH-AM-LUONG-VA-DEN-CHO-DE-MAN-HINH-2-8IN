@@ -192,6 +192,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="effect-btn" onclick="setEffect(9)">🔥 Ngọn lửa ấm</div>
         <div class="effect-btn" onclick="setEffect(10)">⚡ Chớp nháy (Strobe)</div>
       </div>
+      <div style="margin-top: 12px;">
+        <button class="form-btn" id="rainbowDirBtn" onclick="toggleRainbowDir()" style="width: 100%; background: #2f3542; border: 1px solid var(--card-border); padding: 12px; font-size: 0.9rem;">
+          🔄 Chiều chạy Cầu vồng: Thuận (➡️)
+        </button>
+      </div>
     </div>
 
     <!-- COLOR PICKER CARD -->
@@ -237,7 +242,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   <div class="toast" id="toast">Đã lưu cài đặt!</div>
 
   <script>
-    let state = { power: 1, bri: 255, spd: 50, count: 60, fx: 1, r: 255, g: 107, b: 0 };
+    let state = { power: 1, bri: 255, spd: 50, count: 60, fx: 1, r: 255, g: 107, b: 0, rb_rev: 0 };
     let briTimeout = null;
     let spdTimeout = null;
 
@@ -279,6 +284,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       spdTimeout = setTimeout(() => {
         fetch('/api/spd?val=' + val);
       }, 60);
+    }
+
+    function toggleRainbowDir() {
+      fetch('/api/rainbow_dir')
+        .then(r => r.text())
+        .then(val => {
+          state.rb_rev = (val === '1' ? 1 : 0);
+          updateRainbowDirUI();
+          showToast(state.rb_rev ? 'Cầu vồng: Chiều Nghịch (⬅️)' : 'Cầu vồng: Chiều Thuận (➡️)');
+        });
+    }
+
+    function updateRainbowDirUI() {
+      const btn = document.getElementById('rainbowDirBtn');
+      if (btn) {
+        if (state.rb_rev) {
+          btn.innerHTML = '🔄 Chiều Cầu vồng: Nghịch (⬅️)';
+          btn.style.borderColor = 'var(--accent)';
+          btn.style.color = '#fff';
+        } else {
+          btn.innerHTML = '🔄 Chiều Cầu vồng: Thuận (➡️)';
+          btn.style.borderColor = 'var(--card-border)';
+          btn.style.color = 'var(--text)';
+        }
+      }
     }
 
     function setEffect(fxIdx) {
