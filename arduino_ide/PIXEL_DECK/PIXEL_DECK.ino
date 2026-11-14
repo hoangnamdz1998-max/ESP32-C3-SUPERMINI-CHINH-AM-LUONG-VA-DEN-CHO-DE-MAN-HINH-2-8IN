@@ -582,19 +582,98 @@ void loop() {
     }
   }
 
-  // 5. Nút bấm 1 (GPIO 6): Chuyển bài (Next Track)
+  // 5 & 6. Xử lý nút bấm Next (GPIO 6), Prev (GPIO 7) và COMBO BẤM CẢ 2 NÚT ĐỂ ĐỔI HIỆU ỨNG LED
+  static unsigned long btnNextPressTime = 0;
+  static unsigned long btnPrevPressTime = 0;
+  static bool nextPending = false;
+  static bool prevPending = false;
+  static bool comboActive = false;
+  const unsigned long COMBO_WINDOW_MS = 80; // Cửa sổ 80ms để nhận diện bấm đồng thời 2 nút
+
+  bool nextPinLow = (digitalRead(PIN_BTN_NEXT) == LOW);
+  bool prevPinLow = (digitalRead(PIN_BTN_PREV) == LOW);
+
+  // Khi cả 2 nút đều đã nhả ra thì giải phóng cờ combo
+  if (!nextPinLow && !prevPinLow) {
+    comboActive = false;
+  }
+
+  // Lambda hàm chuyển hiệu ứng khi bấm combo 2 nút
+  auto triggerEffectCombo = [&]() {
+    nextPending = false;
+    prevPending = false;
+    comboActive = true;
+
+    // Chuyển sang hiệu ứng kế tiếp (0 -> 10)
+    ledFx = (ledFx + 1) % 11;
+    effectStep = 0;
+    triggerSave();
+
+    Serial.printf("[COMBO 2 NÚT] Bấm cùng lúc Next + Prev -> Đổi hiệu ứng LED: #%d\n", ledFx);
+
+    // Chớp trắng nhanh báo hiệu đã chuyển hiệu ứng thành công
+    if (ledStrip && ledPower) {
+      for (int i = 0; i < ledCount; i++) {
+        ledStrip->setPixelColor(i, Adafruit_NeoPixel::Color(255, 255, 255));
+      }
+      ledStrip->show();
+      delay(40);
+    }
+  };
+
+  // Kiểm tra sự kiện bấm nút Next
   if (btnNext.wasPressed()) {
-    Serial.println("[BUTTON 6] Next Track");
-    if (bleKeyboard.isConnected()) {
-      bleKeyboard.write(KEY_MEDIA_NEXT_TRACK);
+    if (!comboActive) {
+      if (prevPinLow) {
+        // Nút Prev đang giữ sẵn -> Kích hoạt Combo!
+        triggerEffectCombo();
+      } else {
+        nextPending = true;
+        btnNextPressTime = millis();
+      }
     }
   }
 
-  // 6. Nút bấm 2 (GPIO 7): Lùi bài (Previous Track)
+  // Kiểm tra sự kiện bấm nút Prev
   if (btnPrev.wasPressed()) {
-    Serial.println("[BUTTON 7] Previous Track");
-    if (bleKeyboard.isConnected()) {
-      bleKeyboard.write(KEY_MEDIA_PREVIOUS_TRACK);
+    if (!comboActive) {
+      if (nextPinLow) {
+        // Nút Next đang giữ sẵn -> Kích hoạt Combo!
+        triggerEffectCombo();
+      } else {
+        prevPending = true;
+        btnPrevPressTime = millis();
+      }
+    }
+  }
+
+  // Xử lý nút Next sau thời gian chờ combo
+  if (nextPending) {
+    if (prevPinLow || (digitalRead(PIN_BTN_PREV) == LOW)) {
+      triggerEffectCombo();
+    } else if (millis() - btnNextPressTime > COMBO_WINDOW_MS) {
+      nextPending = false;
+      if (!comboActive) {
+        Serial.println("[BUTTON 6] Next Track");
+        if (bleKeyboard.isConnected()) {
+          bleKeyboard.write(KEY_MEDIA_NEXT_TRACK);
+        }
+      }
+    }
+  }
+
+  // Xử lý nút Prev sau thời gian chờ combo
+  if (prevPending) {
+    if (nextPinLow || (digitalRead(PIN_BTN_NEXT) == LOW)) {
+      triggerEffectCombo();
+    } else if (millis() - btnPrevPressTime > COMBO_WINDOW_MS) {
+      prevPending = false;
+      if (!comboActive) {
+        Serial.println("[BUTTON 7] Previous Track");
+        if (bleKeyboard.isConnected()) {
+          bleKeyboard.write(KEY_MEDIA_PREVIOUS_TRACK);
+        }
+      }
     }
   }
 
