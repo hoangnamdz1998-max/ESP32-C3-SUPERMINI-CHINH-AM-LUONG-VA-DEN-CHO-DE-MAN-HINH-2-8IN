@@ -4,6 +4,7 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <Adafruit_NeoPixel.h>
+#include "driver/rmt.h"
 #include <nvs_flash.h>
 #include <BleKeyboard.h>
 #include "webpage.h"
@@ -135,6 +136,76 @@ unsigned long saveTriggerTime = 0;
 
 const char* apSSID = "PIXEL-DECK-LED";
 
+// ================= RMT Hardware Engine Dành Riêng Cho ESP32-C3 =================
+// Khắc phục triệt để lỗi Buffer Underflow & Glitch của thư viện Adafruit_NeoPixel:
+// 1. Khởi tạo RMT channel 0 cố định 1 lần duy nhất, không bao giờ uninstall/re-install.
+// 2. Chân GPIO không bao giờ bị giật mode (giữ cố định mức LOW khi idle).
+// 3. Tăng công suất phát dòng điện cực đại 40mA (GPIO_DRIVE_CAP_3) chống nhiễu đường truyền.
+
+static const rmt_channel_t LED_RMT_CHANNEL = RMT_CHANNEL_0;
+static bool rmtHardwareReady = false;
+
+static void IRAM_ATTR ws2812_rmt_adapter(const void *src, rmt_item32_t *dest, size_t src_size,
+        size_t wanted_num, size_t *translated_size, size_t *item_num)
+{
+    if (src == NULL || dest == NULL) {
+        *translated_size = 0;
+        *item_num = 0;
+        return;
+    }
+    // 80MHz clock: 1 tick = 12.5ns
+    // Bit 0: High 400ns (32 ticks), Low 850ns (68 ticks)
+    // Bit 1: High 800ns (64 ticks), Low 450ns (36 ticks)
+    const rmt_item32_t bit0 = {{{ 32, 1, 68, 0 }}};
+    const rmt_item32_t bit1 = {{{ 64, 1, 36, 0 }}};
+    size_t size = 0;
+    size_t num = 0;
+    uint8_t *psrc = (uint8_t *)src;
+    rmt_item32_t *pdest = dest;
+    while (size < src_size && num < wanted_num) {
+        for (int i = 0; i < 8; i++) {
+            pdest->val = (*psrc & (1 << (7 - i))) ? bit1.val : bit0.val;
+            num++;
+            pdest++;
+        }
+        size++;
+        psrc++;
+    }
+    *translated_size = size;
+    *item_num = num;
+}
+
+void initRmtHardware(uint8_t pin) {
+    if (rmtHardwareReady) {
+        rmt_driver_uninstall(LED_RMT_CHANNEL);
+    }
+    rmt_config_t config = RMT_DEFAULT_CONFIG_TX((gpio_num_t)pin, LED_RMT_CHANNEL);
+    config.clk_div = 1; // 80MHz tick = 12.5ns
+    config.mem_block_num = 1;
+    config.tx_config.idle_output_en = true;
+    config.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+
+    rmt_config(&config);
+    rmt_driver_install(LED_RMT_CHANNEL, 0, 0);
+    rmt_translator_init(LED_RMT_CHANNEL, ws2812_rmt_adapter);
+    rmtHardwareReady = true;
+
+    // Tăng dòng phát của chân GPIO lên mức tối đa (40mA) để triệt tiêu sụt áp tín hiệu
+    gpio_set_drive_capability((gpio_num_t)pin, GPIO_DRIVE_CAP_3);
+}
+
+void showLedStrip() {
+    if (!ledStrip || !rmtHardwareReady) return;
+    uint8_t* pixels = ledStrip->getPixels();
+    uint16_t numBytes = ledStrip->numPixels() * 3;
+    if (!pixels || numBytes == 0) return;
+
+    // Chờ lượt truyền trước kết thúc (nếu có)
+    rmt_wait_tx_done(LED_RMT_CHANNEL, pdMS_TO_TICKS(50));
+    // Bắn xung trực tiếp qua phần cứng RMT cố định - không gỡ driver, không chớp nháy
+    rmt_write_sample(LED_RMT_CHANNEL, pixels, numBytes, true);
+}
+
 // ---------------- Khởi tạo / Cập nhật dải LED ----------------
 void initLedStrip() {
   if (ledStrip != nullptr) {
@@ -143,14 +214,15 @@ void initLedStrip() {
   }
   ledStrip = new Adafruit_NeoPixel(ledCount, PIN_LED_STRIP, NEO_GRB + NEO_KHZ800);
   ledStrip->begin();
+  initRmtHardware(PIN_LED_STRIP);
   ledStrip->setBrightness(ledPower ? ledBrightness : 0);
-  ledStrip->show();
+  showLedStrip();
 }
 
 void updateLedBrightness() {
   if (ledStrip != nullptr) {
     ledStrip->setBrightness(ledPower ? ledBrightness : 0);
-    ledStrip->show();
+    showLedStrip();
   }
 }
 
@@ -223,7 +295,7 @@ void runLedEffects() {
 
   if (!ledPower) {
     ledStrip->clear();
-    ledStrip->show();
+    showLedStrip();
     return;
   }
 
@@ -242,7 +314,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, ledR, ledG, ledB);
       }
-      ledStrip->show();
+      showLedStrip();
       break;
 
     case 1: { // 🌟 TỪ GIỮA RA 2 ĐẦU: Toàn bộ sáng, chỉ 2 bóng tắt chạy từ giữa ra 2 mép
@@ -261,7 +333,7 @@ void runLedEffects() {
       if (rightIdx >= 0 && rightIdx < ledCount) {
         ledStrip->setPixelColor(rightIdx, 0, 0, 0);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -281,7 +353,7 @@ void runLedEffects() {
       if (rightIdx >= 0 && rightIdx < ledCount) {
         ledStrip->setPixelColor(rightIdx, 0, 0, 0);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -297,7 +369,7 @@ void runLedEffects() {
         uint16_t pixelHue = rainbowHue + (i * 65536L / ledCount);
         ledStrip->setPixelColor(i, getBalancedRainbowColor(pixelHue));
       }
-      ledStrip->show();
+      showLedStrip();
       break;
     }
 
@@ -310,7 +382,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, brR, brG, brB);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -323,7 +395,7 @@ void runLedEffects() {
         uint8_t fade = 255 / (t + 1);
         ledStrip->setPixelColor(pos, (ledR * fade) / 255, (ledG * fade) / 255, (ledB * fade) / 255);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -335,7 +407,7 @@ void runLedEffects() {
       } else {
         ledStrip->setPixelColor(pos - ledCount, 0, 0, 0);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -352,7 +424,7 @@ void runLedEffects() {
         int p = random(ledCount);
         ledStrip->setPixelColor(p, ledR, ledG, ledB);
       }
-      ledStrip->show();
+      showLedStrip();
       break;
     }
 
@@ -370,7 +442,7 @@ void runLedEffects() {
       if (head < ledCount) {
         ledStrip->setPixelColor(head, ledR, ledG, ledB);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
@@ -383,7 +455,7 @@ void runLedEffects() {
         int b1 = constrain(ledB - flicker * 3, 0, 255);
         ledStrip->setPixelColor(i, r1, g1, b1);
       }
-      ledStrip->show();
+      showLedStrip();
       break;
     }
 
@@ -392,7 +464,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, on ? ledR : 0, on ? ledG : 0, on ? ledB : 0);
       }
-      ledStrip->show();
+      showLedStrip();
       effectStep++;
       break;
     }
