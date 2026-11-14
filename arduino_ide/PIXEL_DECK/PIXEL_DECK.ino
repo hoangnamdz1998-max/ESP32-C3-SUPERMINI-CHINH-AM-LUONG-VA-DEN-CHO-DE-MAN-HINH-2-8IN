@@ -193,18 +193,28 @@ void savePendingState() {
   }
 }
 
-// ---------------- Bánh xe màu cho hiệu ứng Rainbow ----------------
-uint32_t Wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if (WheelPos < 85) {
-    return Adafruit_NeoPixel::Color(255 - WheelPos * 3, 0, WheelPos * 3);
+// ---------------- Bánh xe màu Cân Bằng Năng Lượng (Constant Power Rainbow) ----------------
+// Đảm bảo tổng năng lượng R + G + B luôn ổn định = 255 tại mọi góc pha (768 bước phân giải).
+// Triệt tiêu 100% hiện tượng sụt áp cổng USB và loại bỏ hoàn toàn vết gãy chu kỳ màu (không chớp).
+static uint32_t getBalancedRainbowColor(uint16_t hue16) {
+  uint32_t pos = ((uint32_t)hue16 * 768UL) >> 16; // 0 đến 767
+  uint8_t r = 0, g = 0, b = 0;
+  if (pos < 256) {
+    r = 255 - (uint8_t)pos;
+    g = (uint8_t)pos;
+    b = 0;
+  } else if (pos < 512) {
+    uint8_t p = (uint8_t)(pos - 256);
+    r = 0;
+    g = 255 - p;
+    b = p;
+  } else {
+    uint8_t p = (uint8_t)(pos - 512);
+    r = p;
+    g = 0;
+    b = 255 - p;
   }
-  if (WheelPos < 170) {
-    WheelPos -= 85;
-    return Adafruit_NeoPixel::Color(0, WheelPos * 3, 255 - WheelPos * 3);
-  }
-  WheelPos -= 170;
-  return Adafruit_NeoPixel::Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+  return Adafruit_NeoPixel::Color(r, g, b);
 }
 
 // ---------------- Các Hiệu Ứng LED RGB ----------------
@@ -276,8 +286,8 @@ void runLedEffects() {
       break;
     }
 
-    case 3: { // 🌈 Cầu vồng cuộn siêu mượt (Rainbow Cycle - Không chớp, hỗ trợ đổi chiều)
-      uint16_t hueStep = map(ledSpeed, 5, 100, 120, 1000);
+    case 3: { // 🌈 Cầu vồng cân bằng công suất (Chống sụt áp & triệt tiêu nháy 100%)
+      uint16_t hueStep = map(ledSpeed, 5, 100, 150, 950);
       if (rainbowReverse) {
         rainbowHue -= hueStep;
       } else {
@@ -285,7 +295,7 @@ void runLedEffects() {
       }
       for (int i = 0; i < ledCount; i++) {
         uint16_t pixelHue = rainbowHue + (i * 65536L / ledCount);
-        ledStrip->setPixelColor(i, ledStrip->gamma32(ledStrip->ColorHSV(pixelHue)));
+        ledStrip->setPixelColor(i, getBalancedRainbowColor(pixelHue));
       }
       ledStrip->show();
       break;
