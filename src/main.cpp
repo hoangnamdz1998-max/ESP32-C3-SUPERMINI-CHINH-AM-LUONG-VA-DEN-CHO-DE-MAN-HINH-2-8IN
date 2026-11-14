@@ -137,62 +137,6 @@ unsigned long saveTriggerTime = 0;
 
 const char* apSSID = "PIXEL-DECK-LED";
 
-// ================= RISC-V 160MHz Cycle-Accurate Hardware Engine =================
-// GIẢI PHÁP TỐI THƯỢNG TRIỆT TIÊU 1000% HIỆN TƯỢNG CHỚP NHÁY TRÊN ESP32-C3:
-// 1. Không dùng RMT (loại bỏ hoàn toàn RMT Buffer Underflow do ngắt Wi-Fi/Bluetooth).
-// 2. Chạy trực tiếp trên IRAM nội với lệnh phần cứng `csrr mcycle` (chuẩn 6.25ns/cycle).
-// 3. Khóa ngắt toàn cục (portDISABLE_INTERRUPTS) trong đúng 0.57ms truyền 19 bóng LED:
-//    Không một tiến trình mạng (Wi-Fi beacon, Bluetooth event) nào có thể chen ngang.
-// 4. Kích dòng GPIO_DRIVE_CAP_3 (40mA) trên chân GPIO 1 xuất xung vuông vắn tuyệt đối.
-
-void IRAM_ATTR showLedStrip() {
-    if (!ledStrip) return;
-    uint8_t* pixels = ledStrip->getPixels();
-    uint16_t numBytes = ledStrip->numPixels() * 3;
-    if (!pixels || numBytes == 0) return;
-
-    const uint32_t pinMask = (1UL << PIN_LED_STRIP);
-    volatile uint32_t* setReg = &GPIO.out_w1ts.val;
-    volatile uint32_t* clrReg = &GPIO.out_w1tc.val;
-
-    // Timing chuẩn WS2812B tại xung nhịp 160 MHz (1 tick = 6.25 ns):
-    // Bit 0: HIGH ~350ns (56 cycles),  TỔNG 1250ns (200 cycles)
-    // Bit 1: HIGH ~800ns (128 cycles), TỔNG 1250ns (200 cycles)
-    const uint32_t CYCLES_BIT0_HI = 56;
-    const uint32_t CYCLES_BIT1_HI = 128;
-    const uint32_t CYCLES_TOTAL   = 200;
-
-    portDISABLE_INTERRUPTS();
-
-    for (size_t b = 0; b < numBytes; b++) {
-        uint8_t byteVal = pixels[b];
-        for (int bit = 7; bit >= 0; bit--) {
-            uint32_t hiCycles = (byteVal & (1 << bit)) ? CYCLES_BIT1_HI : CYCLES_BIT0_HI;
-            uint32_t startCycle;
-            asm volatile("csrr %0, mcycle" : "=r"(startCycle));
-
-            // Kéo chân lên HIGH
-            *setReg = pinMask;
-
-            // Giữ mức HIGH chính xác từng nano-giây
-            uint32_t cur;
-            do {
-                asm volatile("csrr %0, mcycle" : "=r"(cur));
-            } while ((cur - startCycle) < hiCycles);
-
-            // Kéo chân xuống LOW
-            *clrReg = pinMask;
-
-            // Giữ mức LOW cho hết chu kỳ bit 1.25us
-            do {
-                asm volatile("csrr %0, mcycle" : "=r"(cur));
-            } while ((cur - startCycle) < CYCLES_TOTAL);
-        }
-    }
-
-    portENABLE_INTERRUPTS();
-}
-
 // ---------------- Khởi tạo / Cập nhật dải LED ----------------
 void initLedStrip() {
   if (ledStrip != nullptr) {
@@ -201,17 +145,15 @@ void initLedStrip() {
   }
   ledStrip = new Adafruit_NeoPixel(ledCount, PIN_LED_STRIP, NEO_GRB + NEO_KHZ800);
   ledStrip->begin();
-  pinMode(PIN_LED_STRIP, OUTPUT);
-  digitalWrite(PIN_LED_STRIP, LOW);
   gpio_set_drive_capability((gpio_num_t)PIN_LED_STRIP, GPIO_DRIVE_CAP_3);
   ledStrip->setBrightness(ledPower ? ledBrightness : 0);
-  showLedStrip();
+  ledStrip->show();
 }
 
 void updateLedBrightness() {
   if (ledStrip != nullptr) {
     ledStrip->setBrightness(ledPower ? ledBrightness : 0);
-    showLedStrip();
+    ledStrip->show();
   }
 }
 
@@ -284,7 +226,7 @@ void runLedEffects() {
 
   if (!ledPower) {
     ledStrip->clear();
-    showLedStrip();
+    ledStrip->show();
     return;
   }
 
@@ -303,7 +245,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, ledR, ledG, ledB);
       }
-      showLedStrip();
+      ledStrip->show();
       break;
 
     case 1: { // 🌟 TỪ GIỮA RA 2 ĐẦU: Toàn bộ sáng, chỉ 2 bóng tắt chạy từ giữa ra 2 mép
@@ -322,7 +264,7 @@ void runLedEffects() {
       if (rightIdx >= 0 && rightIdx < ledCount) {
         ledStrip->setPixelColor(rightIdx, 0, 0, 0);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -342,7 +284,7 @@ void runLedEffects() {
       if (rightIdx >= 0 && rightIdx < ledCount) {
         ledStrip->setPixelColor(rightIdx, 0, 0, 0);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -358,7 +300,7 @@ void runLedEffects() {
         uint16_t pixelHue = rainbowHue + (i * 65536L / ledCount);
         ledStrip->setPixelColor(i, getBalancedRainbowColor(pixelHue));
       }
-      showLedStrip();
+      ledStrip->show();
       break;
     }
 
@@ -371,7 +313,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, brR, brG, brB);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -384,7 +326,7 @@ void runLedEffects() {
         uint8_t fade = 255 / (t + 1);
         ledStrip->setPixelColor(pos, (ledR * fade) / 255, (ledG * fade) / 255, (ledB * fade) / 255);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -396,7 +338,7 @@ void runLedEffects() {
       } else {
         ledStrip->setPixelColor(pos - ledCount, 0, 0, 0);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -413,7 +355,7 @@ void runLedEffects() {
         int p = random(ledCount);
         ledStrip->setPixelColor(p, ledR, ledG, ledB);
       }
-      showLedStrip();
+      ledStrip->show();
       break;
     }
 
@@ -431,7 +373,7 @@ void runLedEffects() {
       if (head < ledCount) {
         ledStrip->setPixelColor(head, ledR, ledG, ledB);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
@@ -444,7 +386,7 @@ void runLedEffects() {
         int b1 = constrain(ledB - flicker * 3, 0, 255);
         ledStrip->setPixelColor(i, r1, g1, b1);
       }
-      showLedStrip();
+      ledStrip->show();
       break;
     }
 
@@ -453,7 +395,7 @@ void runLedEffects() {
       for (int i = 0; i < ledCount; i++) {
         ledStrip->setPixelColor(i, on ? ledR : 0, on ? ledG : 0, on ? ledB : 0);
       }
-      showLedStrip();
+      ledStrip->show();
       effectStep++;
       break;
     }
